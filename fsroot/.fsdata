@@ -1,0 +1,74 @@
+{
+	["/bin/terminal"] = {
+		["write"] = "root",
+		["read"] = "all",
+		["type"] = "lib",
+		["owner"] = "root",
+	},
+	["/boot"] = {
+		["write"] = "root",
+		["read"] = "all",
+		["type"] = "dir",
+		["owner"] = "root",
+	},
+	["/bin"] = {
+		["write"] = "root",
+		["read"] = "all",
+		["type"] = "dir",
+		["owner"] = "root",
+	},
+	["/dev"] = {
+		["write"] = "root",
+		["read"] = "all",
+		["type"] = "dir",
+		["owner"] = "root",
+	},
+	["/.fsdata"] = {
+		["write"] = "root",
+		["read"] = "root",
+		["type"] = "file",
+		["owner"] = "root",
+	},
+	["/boot/init"] = {
+		["write"] = "root",
+		["read"] = "all",
+		["type"] = "program",
+		["owner"] = "root",
+	},
+	["/"] = {
+		["write"] = "root",
+		["read"] = "all",
+		["type"] = "dir",
+		["owner"] = "root",
+	},
+	["/bin/sh"] = {
+		["write"] = "root",
+		["read"] = "all",
+		["type"] = "program",
+		["owner"] = "root",
+	},
+	["/boot/kernel"] = {
+		["write"] = "root",
+		["read"] = "all",
+		["type"] = "program",
+		["owner"] = "root",
+	},
+	["/boot/stdout.log"] = {
+		["write"] = "root",
+		["read"] = "all",
+		["type"] = "file",
+		["owner"] = "root",
+	},
+	["/dev/null"] = {
+		["write"] = "all",
+		["read"] = "all",
+		["type"] = "stream",
+		["owner"] = "root",
+	},
+	["/dev/full"] = {
+		["write"] = "all",
+		["read"] = "all",
+		["type"] = "stream",
+		["owner"] = "root",
+	},
+}

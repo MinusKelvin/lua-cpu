@@ -1,0 +1,14 @@
+stdout = io.openFile("/boot/stdout.log", "w")
+local getPIDList = os.getPIDList
+
+print("Loading library /bin/terminal")
+loadlibrary("/bin/terminal")
+print("Launching /bin/sh")
+os.createProcess(loadfile("/bin/sh"), "sh", nil, nil, nil, terminal, "keyboard")
+print("Exiting /boot/init")
+
+while #getPIDList() > 1 do
+	os.pullEvent()
+end
+
+stdout.close()

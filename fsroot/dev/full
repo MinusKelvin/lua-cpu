@@ -1,0 +1,5 @@
+return {
+	read = function() return -1 end,
+	write = function() return false end,
+	close = function() end
+}

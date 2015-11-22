@@ -1,0 +1,806 @@
+-- Install serialize() for serializing lua types
+local function serializeImpl(v,tracking,indent)
+	if type(v) == "function" or type(v) == "thread" then
+		error("cannot serialize function or thread", 2)
+	elseif type(v) == "number" or type(v) == "nil" or type(v) == "boolean" then
+		return tostring(v)
+	elseif type(v) == "string" then
+		return '"'..v:gsub("\\", "\\\\"):gsub("\"","\\\""):gsub("\n","\\n")..'"'
+	end
+	assert(type(v) == "table")
+	
+	if tracking[v] then
+		error("cannot serialize recursive table")
+	end
+	tracking[v] = true
+	
+	local result = "{\n"
+	for i,j in pairs(v) do
+		result = result .. indent .. "\t[" .. serializeImpl(i,tracking,"") .. "] = " .. serializeImpl(j,tracking,indent.."\t") .. ",\n"
+	end
+	return result .. indent .. "}"
+end
+
+function serialize(v)
+	return serializeImpl(v, {}, "")
+end
+
+-- Install a simple table contains function
+function table.contains(t, v)
+	if v == nil then return true end
+	for _,j in pairs(t) do
+		if j == v then return true end
+	end
+	return false
+end
+
+-- Install loadfile and dofile
+function loadfile(path)
+	if io.getType(path) ~= "program" then
+		error("file is not executable", 2)
+	end
+	local file = io.openFile(path, "r")
+	local f = loadstring(file.readAll(), io.filename(path))
+	setfenv(f, getfenv(2))
+	file.close()
+	return f
+end
+
+function dofile(path, ...)
+	if io.getType(path) ~= "program" then
+		error("file is not executable", 2)
+	end
+	local file = io.openFile(path, "r")
+	local f = loadstring(file.readAll(), io.filename(path))
+	setfenv(f, getfenv(2))
+	file.close()
+	return f()
+end
+
+-- Install loadLibrary
+function loadlibrary(path)
+	if io.getType(path) ~= "lib" then
+		error("file is not a library", 2)
+	end
+	local file = io.openFile(path, "r")
+	local f = loadstring(file.readAll(), io.filename(path))
+	setfenv(f, getfenv(2))
+	f()
+	file.close()
+end
+
+-- Install lua parts of the os API.
+-- Local copy of os exists for security reasons and should never leave this file's scope.
+local secureOs = {}
+local nativeOs = os
+os = {}
+
+-- Used in main loop and parts of os API
+local currentProcess
+local keyboardStreams = {}
+local processes = {}
+local newProcs = {}
+local largestPID = 0
+local users = {}
+local userpasswords = {}
+
+users.root = {}
+function users.root.inGroup()
+	return true
+end
+function users.root.getName()
+	return "root"
+end
+function users.root.addGroup(group) end
+function users.root.removeGroup(group) end
+
+function secureOs.getUser(pid)
+	local usr
+	pid = pid or currentProcess.pid
+	if type(pid) == "string" then
+		if users[pid] then
+			usr = users[pid]
+		else
+			error("not a valid username", 2)
+		end
+	elseif processes[pid] then
+		usr = processes[pid].user 
+	else
+		error("invalid pid/username", 2)
+	end
+	local user = {}
+	setmetatable(user, {
+		__index = function(t, k)
+			if t ~= user then
+				error("not the user object", 2)
+			else
+				return usr[k]
+			end
+		end
+	})
+	return user
+end
+
+function secureOs.getPID()
+	return currentProcess.pid
+end
+
+function secureOs.getProcessName(pid)
+	pid = pid or currentProcess.pid
+	return processes[pid].name
+end
+
+function secureOs.getPIDList()
+	local pids = {}
+	for _,j in pairs(processes) do
+		pids[#pids+1] = j.pid
+	end
+	for _,j in pairs(newProcs) do
+		pids[#pids+1] = j.pid
+	end
+	return pids
+end
+
+function secureOs.createProcess(func, name, user, pass, env, stdout, stdin)
+	local proc = {}
+	
+	proc.stdout = stdout or io.openFile("/dev/null", "w")
+	if stdin == "keyboard" then
+		local buffer = {}
+		local out = io.openOutputStream(function(b)
+			buffer[#buffer+1] = b
+			return true
+		end, function()end)
+		proc.stdin = io.openInputStream(function()
+			while #buffer == 0 do
+				os.pullEvent()
+			end
+			return table.remove(buffer, 1)
+		end, function()
+			for i,j in pairs(keyboardStreams) do
+				if j == out then
+					table.remove(keyboardStreams, i)
+					return
+				end
+			end
+		end)
+		out.proc = proc
+		keyboardStreams[#keyboardStreams+1] = out
+	elseif stdin then
+		proc.stdin = stdin
+	else
+		proc.stdin = io.openFile("/dev/full", "r")
+	end
+	
+	env = env or {}
+	env.stdout = proc.stdout
+	env.stdin = proc.stdin
+	env.print = function(...)
+		for i,j in ipairs({...}) do
+			if not env.stdout.writeString(tostring(j)) then
+				return false
+			end
+		end
+		return env.stdout.writeByte(("\n"):byte(1))
+	end
+	setmetatable(env, {__index = getfenv(2)})
+	setfenv(func, env)
+	proc.thread = coroutine.create(func)
+	
+	largestPID = largestPID + 1
+	proc.pid = largestPID
+	proc.name = name
+	
+	if user then
+		if users[user] then
+			if userpasswords[user] then
+				if userpasswords[user] == pass then
+					proc.user = users[user]
+				else
+					error("invalid password", 2)
+				end
+			else
+				proc.user = users[user]
+			end
+		else
+			error("not a user", 2)
+		end
+	else
+		proc.user = currentProcess.user
+	end
+	
+	newProcs[proc.pid] = proc
+	return proc.pid
+end
+
+function secureOs.pullEvent()
+	return coroutine.yield()
+end
+
+function secureOs.processExists(pid)
+	return processes[pid] ~= nil or newProcs[pid] ~= nil
+end
+
+function secureOs.startTimer(time, ...)
+	return nativeOs.startTimer(time, {currentProcess.pid,...})
+end
+
+for i,j in pairs(secureOs) do
+	os[i] = j
+end
+setmetatable(os, {__index = function(t, k)
+	if t == os then
+		return secureOs[k]
+	end
+	error("not the os api", 2)
+end})
+
+-- Install the io API, remove the fs API
+local nativefs = fs
+fs = nil
+io = {}
+
+local function openInputStream(readfunc, closefunc)
+	local closed = false
+	local this = {}
+	
+	function this.readByte()
+		if not closed then
+			return readfunc() or error("error occured while reading stream", 2)
+		end
+		error("cannot read from closed stream", 2)
+	end
+	
+	function this.close()
+		if not closed then
+			closefunc()
+			closed = true
+		end
+	end
+	
+	function this.readLine()
+		if closed then
+			error("cannot read from closed stream", 2)
+		end
+		local r = ""
+		local c = this.readByte()
+		while c ~= -1 and string.char(c) ~= "\n" do
+			r = r .. string.char(c)
+			c = this.readByte()
+		end
+		return r
+	end
+	
+	function this.readAll()
+		if closed then
+			error("cannot read from closed stream", 2)
+		end
+		local r = ""
+		local c = this.readByte()
+		while c ~= -1 do
+			r = r .. string.char(c)
+			c = this.readByte()
+		end
+		return r
+	end
+	
+	function this.isClosed()
+		return closed
+	end
+	
+	return this
+end
+
+local function openOutputStream(writefunc, closefunc)
+	local closed = false
+	local this = {}
+	
+	function this.writeByte(v)
+		if not closed then
+			return writefunc(v)
+		end
+		error("cannot write to closed stream", 2)
+	end
+	
+	function this.close()
+		if not closed then
+			closefunc()
+			closed = true
+		end
+	end
+	
+	function this.writeString(v)
+		if closed then
+			error("cannot write to closed stream", 2)
+		end
+		for i=1, #v do
+			if not this.writeByte(v:byte(i)) then
+				return false, i-1
+			end
+		end
+		return true
+	end
+	
+	function this.isClosed()
+		return closed
+	end
+	
+	return this
+end
+
+local function combine(path1, path2)
+	if path1:sub(-1) == "/" then
+		path1 = path1:sub(1,-2)
+	end
+	if path2:sub(-1) == "/" then
+		path2 = path2:sub(1,-2)
+	end
+	if path2:sub(1,1) ~= "/" then
+		path2 = "/" .. path2
+	end
+	return path1 .. path2
+end
+
+local fsData = {}
+
+local function init()
+	local fsDataFile = nativefs.open("/.fsdata")
+	local loadedFsData = loadstring("return "..fsDataFile.readAll(), ".fsdata")()
+	fsDataFile.close()
+	local directoryQueue = {"/"}
+	
+	while #directoryQueue ~= 0 do
+		local f = directoryQueue[1]
+		fsData[f] = loadedFsData[f]
+		if fsData[f] == nil then
+			local parent = ""
+			local d = false
+			for i=#f, 1, -1 do
+				if f:sub(i,i) == "/" and not d then
+					d = true
+				elseif d then
+					parent = f:sub(i,i) .. parent
+				end
+			end
+			parent = combine("/", parent)
+			fsData[f] = {}
+			fsData[f].write = fsData[parent].write
+			fsData[f].read = fsData[parent].read
+			fsData[f].owner = fsData[parent].owner
+			if nativefs.isDir(f) then
+				fsData[f].type = "dir"
+			else
+				fsData[f].type = "file"
+			end
+		end
+		
+		if nativefs.isDir(f) then
+			local list = nativefs.list(f)
+			for i=1, #list do
+				directoryQueue[#directoryQueue+1] = combine(f,list[i])
+			end
+		end
+		table.remove(directoryQueue, 1)
+	end
+end
+init()
+
+local function resolve(_path, keepLastLink, depth)
+	if not depth or type(depth) ~= "number" then depth = 1 end
+	if depth == 16 then
+		error("io.resolve: too many links, exceeded maximum recursion depth")
+	end
+	
+	if _path:sub(1,1) ~= "/" then
+		_path = combine(process.getWorkingDirectory(), _path)
+	else
+		_path = combine("", _path)
+	end
+	
+	local path = {}
+	for i=1, #_path do
+		if _path:sub(i,i) == "/" then
+			path[#path+1] = ""
+		else
+			path[#path] = path[#path] .. _path:sub(i,i)
+		end
+	end
+	
+	local lastPart = 1
+	while true do
+		if path[lastPart] == "." then
+			if #path == 1 then
+				path[1] = ""
+			else
+				table.remove(path, lastPart)
+			end
+		elseif path[lastPart] == ".." then
+			if #path == 1 then
+				path[1] = ""
+			else
+				table.remove(path, lastPart)
+				if lastPart ~= 1 then
+					lastPart = lastPart - 1
+					table.remove(path, lastPart)
+				end
+			end
+		else
+			local currentPath = ""
+			for i=1, lastPart do
+				currentPath = currentPath .. "/" .. path[i]
+			end
+			if lastPart == #path and not (fsData[currentPath] and fsData[currentPath].type == "link" and not keepLastLink) then
+				return currentPath
+			elseif not fsData[currentPath] then
+				error("io.resolve: not found")
+			elseif fsData[currentPath].type ~= "link" and fsData[currentPath].type ~= "dir" then
+				error("io.resolve: not a directory")
+			elseif not secureOs.getUser().inGroup(fsData[currentPath].read) then
+				error("io.resolve: permission denied")
+			elseif fsData[currentPath].type == "link" then
+				local link = nativefs.open(currentPath)
+				local newpath = link.readAll()
+				link.close()
+				
+				local afterLink = ""
+				for i=lastPart+1, #path do
+					afterLink = afterLink .. "/" .. path[i]
+				end
+				
+				if newpath:sub(1,1) == "/" then
+					return resolve(combine(newpath, afterLink), keepLastLink, depth+1)
+				else
+					currentPath = ""
+					for i=1, lastPart-1 do
+						currentPath = currentPath .. "/" .. path[i]
+					end
+					return resolve(combine(combine(currentPath, newpath), afterLink), keepLastLink, depth+1)
+				end
+			end
+			lastPart = lastPart + 1
+		end
+	end
+end
+
+local function hasOwnerPermission(path)
+	path = resolve(path)
+	return fsData[path] and secureOs.getUser().inGroup(fsData[path].owner)
+end
+
+local function hasReadPermission(path)
+	path = resolve(path)
+	return fsData[path] and secureOs.getUser().inGroup(fsData[path].read) or hasOwnerPermission(path)
+end
+
+local function hasWritePermission(path)
+	path = resolve(path)
+	return fsData[path] and secureOs.getUser().inGroup(fsData[path].write) or hasOwnerPermission(path)
+end
+
+local function getType(path, keepLastLink)
+	path = resolve(path, keepLastLink)
+	return fsData[path] ~= nil and fsData[path].type or "not found"
+end
+
+local function exists(path)
+	return getType(path) == "not found"
+end
+
+local function isFile(path)
+	return table.contains({"file","program","stream","lib"}, getType(path))
+end
+
+local function openFile(path, mode)
+	path = resolve(path)
+	if mode == "r" then
+		if isFile(path) then
+			if hasReadPermission(path) then
+				local file = nativefs.open(path)
+				if getType(path) == "stream" then
+					local f = loadstring(file.readAll())
+					file.close()
+					local env = {}
+					setmetatable(env, {__index=_G})
+					setfenv(f, env)
+					local funcs = f()
+					return openInputStream(funcs.read, funcs.close)
+				else
+					return openInputStream(file.readByte, file.close)
+				end
+			else
+				error("permission denied", 2)
+			end
+		else
+			error("not a file", 2)
+		end
+	elseif mode == "w" then
+		if getType(path) ~= "dir" then
+			if not fsData[path] then
+				local parent = ""
+				local d = false
+				for i=#path, 1, -1 do
+					if path:sub(i,i) == "/" and not d then
+						d = true
+					elseif d then
+						parent = path:sub(i,i) .. parent
+					end
+				end
+				parent = combine("/", parent)
+				if not hasWritePermission(parent) then
+					error("permission denied", 2)
+				end
+				fsData[path] = {}
+				fsData[path].type = "file"
+				fsData[path].owner = fsData[parent].owner
+				fsData[path].read = fsData[parent].read
+				fsData[path].write = fsData[parent].write
+			end
+			if hasWritePermission(path) then
+				if getType(path) == "stream" then
+					local file = nativefs.open(path)
+					local f = loadstring(file.readAll())
+					file.close()
+					local env = {}
+					setmetatable(env, {__index=_G})
+					setfenv(f, env)
+					local funcs = f()
+					return openOutputStream(funcs.write, funcs.close)
+				else
+					local file = nativefs.open(path, "w")
+					return openOutputStream(file.writeByte, file.close)
+				end
+			else
+				error("permission denied", 2)
+			end
+		else
+			error("not a file", 2)
+		end
+	elseif mode == "a" then
+		if isFile(path) then
+			if hasWritePermission(path) then
+				if getType(path) == "stream" then
+					local file = nativefs.open(path)
+					local f = loadstring(file.readAll())
+					file.close()
+					local env = {}
+					setmetatable(env, {__index=_G})
+					setfenv(f, env)
+					local funcs = f()
+					return openOutputStream(funcs.write, funcs.close)
+				else
+					local file = nativefs.open(path, "a")
+					return openOutputStream(file.readByte, file.close)
+				end
+			else
+				error("permission denied", 2)
+			end
+		else
+			error("not a file", 2)
+		end
+	else
+		error("invalid mode", 2)
+	end
+end
+
+local function filename(path)
+	return path:match("/([^/]*)$")
+end
+
+io.openInputStream = openInputStream
+io.openOutputStream = openOutputStream
+io.combine = combine
+io.resolve = resolve
+io.hasOwnerPermission = hasOwnerPermission
+io.hasReadPermission = hasReadPermission
+io.hasWritePermission = hasWritePermission
+io.getType = getType
+io.exists = exists
+io.isFile = isFile
+io.openFile = openFile
+io.filename = filename
+
+largestPID = 1
+processes[1] = {}
+processes[1].stdout = io.openOutputStream(function()return false end,function() end)
+processes[1].stdin = io.openInputStream(function()return -1 end,function() end)
+processes[1].user = users.root
+processes[1].pid = 1
+processes[1].name = "init"
+local bootinit = nativefs.open("/boot/init")
+local func = loadstring(bootinit.readAll(), "init")
+bootinit.close()
+local env = {}
+env.stdout = processes[1].stdout
+env.stdin = processes[1].stdin
+env.print = function(...)
+	for i,j in ipairs({...}) do
+		if not env.stdout.writeString(tostring(j)) then
+			return false
+		end
+	end
+	return env.stdout.writeByte(("\n"):byte(1))
+end
+setmetatable(env, {__index = _G})
+setfenv(func, env)
+processes[1].thread = coroutine.create(func)
+
+local nativeScreenUpdate = screen.update
+local shouldUpdate = false
+function screen.update()
+	shouldUpdate = true
+end
+
+while true do
+	local remove = {}
+	local c = 0
+	for pid,proc in pairs(processes) do
+		c = c + 1
+		currentProcess = proc
+		local ok, err = coroutine.resume(currentProcess.thread)
+		currentProcess = nil
+		if not ok then
+			print(err)
+		end
+		if coroutine.status(proc.thread) == "dead" then
+			remove[#remove+1] = pid
+			c = c - 1
+		end
+	end
+	for i=1,#remove do
+		processes[remove[i]] = nil
+	end
+	local skipPull = false
+	for i,proc in pairs(newProcs) do
+		processes[i] = proc
+		c = c + 1
+		skipPull = true
+	end
+	newProcs = {}
+	
+	if c == 0 then
+		break
+	end
+	
+	if shouldUpdate then
+		nativeScreenUpdate()
+	end
+	
+	if not skipPull then
+		local result = {nativeOs.pullEvent() }
+--		print(serialize(result))
+		if result[1] == "key" and #keyboardStreams > 0 then
+			local e,key,action,mods = unpack(result)
+			if action then
+				local lookup = {}
+				lookup[259]=string.char(8)
+				lookup[261]=string.char(127)
+				lookup[256]=string.char(27).." "
+				lookup[258]="\t"
+				lookup[257]="\n"
+				lookup[32]=" "
+				lookup[263]=string.char(27).."A"
+				lookup[262]=string.char(27).."B"
+				lookup[265]=string.char(27).."C"
+				lookup[264]=string.char(27).."D"
+				if mods == 0 then
+					lookup[65]="a"
+					lookup[66]="b"
+					lookup[67]="c"
+					lookup[68]="d"
+					lookup[69]="e"
+					lookup[70]="f"
+					lookup[71]="g"
+					lookup[72]="h"
+					lookup[73]="i"
+					lookup[74]="j"
+					lookup[75]="k"
+					lookup[76]="l"
+					lookup[77]="m"
+					lookup[78]="n"
+					lookup[79]="o"
+					lookup[80]="p"
+					lookup[81]="q"
+					lookup[82]="r"
+					lookup[83]="s"
+					lookup[84]="t"
+					lookup[85]="u"
+					lookup[86]="v"
+					lookup[87]="w"
+					lookup[88]="x"
+					lookup[89]="y"
+					lookup[90]="z"
+					lookup[49]="1"
+					lookup[50]="2"
+					lookup[51]="3"
+					lookup[52]="4"
+					lookup[53]="5"
+					lookup[54]="6"
+					lookup[55]="7"
+					lookup[56]="8"
+					lookup[57]="9"
+					lookup[48]="0"
+					lookup[45]="-"
+					lookup[61]="="
+					lookup[91]="["
+					lookup[93]="]"
+					lookup[92]="\\"
+					lookup[59]=";"
+					lookup[39]="'"
+					lookup[44]=","
+					lookup[46]="."
+					lookup[47]="/"
+					lookup[96]="`"
+				elseif mods == 1 then
+					lookup[65]="A"
+					lookup[66]="B"
+					lookup[67]="C"
+					lookup[68]="D"
+					lookup[69]="E"
+					lookup[70]="F"
+					lookup[71]="G"
+					lookup[72]="H"
+					lookup[73]="I"
+					lookup[74]="J"
+					lookup[75]="K"
+					lookup[76]="L"
+					lookup[77]="M"
+					lookup[78]="N"
+					lookup[79]="O"
+					lookup[80]="P"
+					lookup[81]="Q"
+					lookup[82]="R"
+					lookup[83]="S"
+					lookup[84]="T"
+					lookup[85]="U"
+					lookup[86]="V"
+					lookup[87]="W"
+					lookup[88]="X"
+					lookup[89]="Y"
+					lookup[90]="Z"
+					lookup[49]="!"
+					lookup[50]="@"
+					lookup[51]="#"
+					lookup[52]="$"
+					lookup[53]="%"
+					lookup[54]="^"
+					lookup[55]="&"
+					lookup[56]="*"
+					lookup[57]="("
+					lookup[48]=")"
+					lookup[45]="_"
+					lookup[61]="+"
+					lookup[91]="{"
+					lookup[93]="}"
+					lookup[92]="|"
+					lookup[59]=":"
+					lookup[39]="\""
+					lookup[44]="<"
+					lookup[46]=">"
+					lookup[47]="?"
+					lookup[96]="~"
+				end
+				if lookup[key] then
+					keyboardStreams[#keyboardStreams].writeString(lookup[key])
+				end
+			end
+		elseif result[1] == "timer" then
+			local e, id, data = unpack(result)
+			local pid = table.remove(data, 1)
+			if secureOs.processExists(pid) then
+				currentProcess = processes[pid]
+				local ok, err = coroutine.resume(currentProcess.thread, "timer", id, unpack(data))
+				currentProcess = nil
+				if not ok then
+					print(err)
+				end
+				if coroutine.status(processes[pid].thread) == "dead" then
+					processes[pid] = nil
+				end
+			end
+		end
+	end
+end
+
+local fsDataFile = nativefs.open("/.fsdata", "w")
+fsDataFile.writeString(serializeImpl(fsData,{},""))
+fsDataFile.close()

@@ -1,0 +1,68 @@
+for i,j in pairs(os) do
+	print(i,"    ",j)
+end
+
+local input = coroutine.create(function()
+	local currentCommand = ""
+	local cursorPos = 1
+	local startPos = 1
+	local currentLine = ({stdout.getCursorPos()})[2]
+	while true do
+		stdout.clearLine()
+		if cursorPos < 1 then
+			cursorPos = 1
+		elseif cursorPos > #currentCommand+1 then
+			cursorPos = #currentCommand+1
+		end
+		if cursorPos > 123 then
+			startPos = cursorPos - 123
+		else
+			startPos = 1
+		end
+		stdout.writeString(os.getUser().getName() .. " / # " .. currentCommand:sub(startPos, startPos + 123))
+		stdout.setCursorPos(#(os.getUser().getName() .. " / # ") + cursorPos - startPos, currentLine)
+		local b = stdin.readByte()
+		local c = string.char(b)
+		if b == 27 then
+			local b = stdin.readByte()
+			local c = string.char(b)
+			if c == "A" then
+				cursorPos = cursorPos - 1
+			elseif c == "B" then
+				cursorPos = cursorPos + 1
+			elseif c == " " then
+				return
+			end
+		elseif b == 8 then
+			if cursorPos > 1 then
+				currentCommand = currentCommand:sub(1,cursorPos-2) .. currentCommand:sub(cursorPos)
+				cursorPos = cursorPos - 1
+			end
+		elseif b == 127 then
+			if cursorPos <= #currentCommand then
+				currentCommand = currentCommand:sub(1,cursorPos-1) .. currentCommand:sub(cursorPos+1)
+			end
+		elseif c == "\n" then
+			
+		else
+			currentCommand = currentCommand:sub(1,cursorPos-1) .. c .. currentCommand:sub(cursorPos)
+			cursorPos = cursorPos + 1
+		end
+	end
+end)
+
+os.startTimer(0.4)
+while true do
+	local ok, err = coroutine.resume(input)
+	if not ok then
+		error(err)
+	end
+	if coroutine.status(input) == "dead" then
+		break
+	end
+	local event = os.pullEvent()
+	if event == "timer" then
+		stdout.blinkCursor()
+		os.startTimer(0.4)
+	end
+end
